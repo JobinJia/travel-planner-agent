@@ -60,7 +60,6 @@ Responsibilities:
   - [src/store/thread-message-store.ts](/Users/jobin/myself/code-workspace/travel-planner-agent/src/store/thread-message-store.ts)
 - external providers:
   - [src/providers/amap.ts](/Users/jobin/myself/code-workspace/travel-planner-agent/src/providers/amap.ts)
-  - [src/providers/qweather.ts](/Users/jobin/myself/code-workspace/travel-planner-agent/src/providers/qweather.ts)
 
 ## LangGraph State Flow
 
@@ -125,6 +124,8 @@ Current main endpoints:
 
 - `GET /health`
 - `GET /health/db`
+- `GET /api/pois/nearby`
+- `GET /api/pois/nearby-by-address`
 - `POST /api/trips/plan`
 - `POST /api/trips/revise`
 - `GET /api/trips`
@@ -156,6 +157,7 @@ The frontend maintains:
 - selected thread
 - search query
 - archive filter
+- nearby POI query form state
 - current conversation bubbles
 - currently highlighted candidate option
 

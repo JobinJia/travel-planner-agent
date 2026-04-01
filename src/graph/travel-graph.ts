@@ -4,7 +4,7 @@ import { ChatOpenAI } from "@langchain/openai";
 import { z } from "zod";
 
 import { getCheckpointer } from "./checkpointer.js";
-import { CandidatePlan, ConfirmationOption, TravelPreferenceProfile } from "../types/travel.js";
+import { CandidatePlan, ConfirmationOption, OptionComparison, TravelPreferenceProfile } from "../types/travel.js";
 import {
   CLARIFICATION_PROMPT,
   CONFIRMATION_PROMPT,
@@ -40,16 +40,16 @@ const CandidatePlanSchema = z.object({
 });
 
 const TravelProfileSchema = z.object({
-  origin: z.string().optional(),
-  destination: z.string().optional(),
-  startDate: z.string().optional(),
-  endDate: z.string().optional(),
-  budgetCny: z.number().optional(),
-  travelers: z.number().optional(),
-  interests: z.array(z.string()).default([]),
-  pace: z.enum(["relaxed", "balanced", "packed"]).optional(),
-  travelStyle: z.enum(["budget", "balanced", "premium"]).optional(),
-  notes: z.array(z.string()).default([])
+  origin: z.string().nullable(),
+  destination: z.string().nullable(),
+  startDate: z.string().nullable(),
+  endDate: z.string().nullable(),
+  budgetCny: z.number().nullable(),
+  travelers: z.number().nullable(),
+  interests: z.array(z.string()),
+  pace: z.enum(["relaxed", "balanced", "packed"]).nullable(),
+  travelStyle: z.enum(["budget", "balanced", "premium"]).nullable(),
+  notes: z.array(z.string())
 });
 
 const ClarificationSchema = z.object({
@@ -90,6 +90,10 @@ const GraphState = Annotation.Root({
     reducer: (_current, update) => update,
     default: () => ""
   }),
+  optionComparisons: Annotation<OptionComparison[]>({
+    reducer: (_current, update) => update,
+    default: () => []
+  }),
   liveContext: Annotation<string>({
     reducer: (_current, update) => update,
     default: () => ""
@@ -123,9 +127,40 @@ const GraphState = Annotation.Root({
 function createModel() {
   return new ChatOpenAI({
     apiKey: process.env.OPENAI_API_KEY,
-    model: process.env.OPENAI_MODEL || "gpt-4.1-mini",
+    configuration: process.env.OPENAI_BASE_URL
+      ? {
+          baseURL: process.env.OPENAI_BASE_URL
+        }
+      : undefined,
+    model: process.env.OPENAI_MODEL || "gpt-5.4",
     temperature: 0.2
   });
+}
+
+function extractTextFromModelContent(content: unknown): string {
+  if (typeof content === "string") {
+    return content;
+  }
+
+  if (Array.isArray(content)) {
+    return content
+      .map((item) => {
+        if (typeof item === "string") {
+          return item;
+        }
+
+        if (item && typeof item === "object" && "text" in item && typeof item.text === "string") {
+          return item.text;
+        }
+
+        return "";
+      })
+      .filter(Boolean)
+      .join("\n\n")
+      .trim();
+  }
+
+  return "";
 }
 
 function mergeProfile(
@@ -376,9 +411,36 @@ async function compareOptionsNode(state: typeof GraphState.State) {
   const realtime = await buildLiveTravelContext(profile, state.options);
   const liveContext = realtime.liveContext;
   const routeContext = realtime.routeContext;
+  const optionComparisons: OptionComparison[] = state.options.map((option, index) => {
+    const budget = estimateBudget({
+      destination,
+      days,
+      travelers,
+      travelStyle: option.travelStyle
+    });
+
+    const budgetFit =
+      profile?.budgetCny && budget.total > profile.budgetCny
+        ? `超出当前预算约 ${budget.total - profile.budgetCny} 元`
+        : profile?.budgetCny
+          ? `在当前预算内，预计结余约 ${profile.budgetCny - budget.total} 元`
+          : "用户未提供总预算，暂按经验估算";
+
+    return {
+      title: option.title,
+      summary: option.summary,
+      pace: option.pace,
+      travelStyle: option.travelStyle,
+      suitableFor: option.suitableFor,
+      budget,
+      budgetFit,
+      routeMetrics: realtime.optionRouteMetrics[index]
+    };
+  });
 
   return {
     comparison,
+    optionComparisons,
     liveContext,
     routeContext,
     requiresConfirmation: shouldRequireConfirmation(routeContext, state.latestUserRequest),
@@ -412,7 +474,7 @@ async function requestConfirmationNode(state: typeof GraphState.State) {
   });
 
   const confirmationMessage =
-    typeof answer.content === "string" ? answer.content : JSON.stringify(answer.content);
+    extractTextFromModelContent(answer.content);
 
   return {
     confirmationMessage,
@@ -454,7 +516,7 @@ async function finalizeNode(state: typeof GraphState.State) {
   });
 
   return {
-    finalAnswer: typeof answer.content === "string" ? answer.content : JSON.stringify(answer.content)
+    finalAnswer: extractTextFromModelContent(answer.content)
   };
 }
 

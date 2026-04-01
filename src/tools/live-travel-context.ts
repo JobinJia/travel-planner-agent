@@ -1,14 +1,73 @@
-import { CandidatePlan, DailyPlan, TravelPreferenceProfile } from "../types/travel.js";
+import { CandidatePlan, DailyPlan, OptionRouteMetrics, TravelPreferenceProfile } from "../types/travel.js";
 import {
   geocodeDestination,
   getDrivingRoute,
   getTransitRoute,
   getWalkingRoute,
+  getWeatherLive,
+  getWeatherForecast,
   searchPoi,
   RouteMode,
   RouteSummary
 } from "../providers/amap.js";
-import { getDailyForecast } from "../providers/qweather.js";
+
+function hasConfiguredAmapKey() {
+  const key = process.env.AMAP_API_KEY?.trim();
+  return Boolean(key && key !== "your_amap_api_key");
+}
+
+function dedupeNonEmpty(values: Array<string | undefined>) {
+  return [...new Set(values.map((value) => value?.trim()).filter(Boolean))] as string[];
+}
+
+function buildWeatherQueryCandidates(destination: string, geocode: {
+  adcode?: string;
+  province?: string;
+  city?: string;
+  district?: string;
+  formattedAddress: string;
+}) {
+  void destination;
+  void geocode.formattedAddress;
+  return dedupeNonEmpty([
+    geocode.adcode,
+    geocode.district,
+    geocode.city,
+    geocode.province,
+  ]);
+}
+
+async function resolveWeatherContext(candidates: string[]) {
+  let lastError: Error | null = null;
+
+  for (const query of candidates) {
+    try {
+      const [live, forecast] = await Promise.all([
+        getWeatherLive(query),
+        getWeatherForecast(query)
+      ]);
+
+      if (live || forecast.length > 0) {
+        return {
+          live,
+          forecast,
+          query,
+          error: null
+        };
+      }
+    } catch (error) {
+      lastError = error instanceof Error ? error : new Error("unknown error");
+    }
+  }
+
+  return {
+    live: null,
+    forecast: [] as Awaited<ReturnType<typeof getWeatherForecast>>,
+    query: "",
+    error: lastError ?? new Error(`AMap 天气查询无结果，已尝试：${candidates.join(" -> ")}`)
+  };
+}
+
 
 function buildPoiKeyword(destination: string, interests: string[]) {
   if (interests.some((interest) => interest.includes("美食"))) {
@@ -61,6 +120,13 @@ function summarizeModeLabel(mode: RouteMode) {
   return "驾车";
 }
 
+function pickBestAvailableMinutes(
+  preferredMode: RouteMode,
+  routeByMode: Partial<Record<RouteMode, number>>
+) {
+  return routeByMode[preferredMode] ?? routeByMode.transit ?? routeByMode.driving ?? routeByMode.walking ?? null;
+}
+
 function pickPreferredMode(option: CandidatePlan): RouteMode {
   if (option.pace === "relaxed") {
     return "walking";
@@ -76,7 +142,7 @@ function pickPreferredMode(option: CandidatePlan): RouteMode {
 
 function assessCongestion(option: CandidatePlan, routeByMode: Partial<Record<RouteMode, number>>) {
   const preferredMode = pickPreferredMode(option);
-  const preferredMinutes = routeByMode[preferredMode] ?? routeByMode.transit ?? routeByMode.driving ?? routeByMode.walking ?? null;
+  const preferredMinutes = pickBestAvailableMinutes(preferredMode, routeByMode);
   if (preferredMinutes === null) {
     return `方案“${option.title}”未获取到路线数据，无法做拥挤度判断。`;
   }
@@ -194,7 +260,7 @@ async function collectDailyRouteSamples(destination: string, city: string | unde
   return dailySamples.filter((sample) => sample.pois.length >= 2);
 }
 
-function scoreCongestionByMinutes(option: CandidatePlan, preferredMinutes: number | null) {
+function scoreCongestionByMinutes(option: CandidatePlan, preferredMinutes: number | null): "低" | "中" | "高" | "未知" {
   if (preferredMinutes === null) {
     return "未知";
   }
@@ -217,12 +283,7 @@ function buildOptionDailyAssessment(option: CandidatePlan, dailySamples: Array<{
 
   const preferredMode = pickPreferredMode(option);
   const lines = dailySamples.map((sample) => {
-    const preferredMinutes =
-      sample.routeMatrix.totalMinutesByMode[preferredMode]
-      ?? sample.routeMatrix.totalMinutesByMode.transit
-      ?? sample.routeMatrix.totalMinutesByMode.driving
-      ?? sample.routeMatrix.totalMinutesByMode.walking
-      ?? null;
+    const preferredMinutes = pickBestAvailableMinutes(preferredMode, sample.routeMatrix.totalMinutesByMode);
     const level = scoreCongestionByMinutes(option, preferredMinutes);
 
     const modeParts = (["walking", "transit", "driving"] as RouteMode[])
@@ -235,20 +296,70 @@ function buildOptionDailyAssessment(option: CandidatePlan, dailySamples: Array<{
   return [`方案“${option.title}”逐日路线评估：`, ...lines].join("\n");
 }
 
+function buildOptionRouteMetrics(option: CandidatePlan, routeByMode: Partial<Record<RouteMode, number>>, dailySamples: Array<{
+  dayLabel: string;
+  outline: string;
+  pois: Array<{ name: string; location: string }>;
+  routeMatrix: { totalMinutesByMode: Partial<Record<RouteMode, number>> };
+}>): OptionRouteMetrics {
+  const preferredMode = pickPreferredMode(option);
+  const preferredMinutes = pickBestAvailableMinutes(preferredMode, routeByMode);
+  const dailyMetrics = dailySamples.map((sample) => {
+    const dayPreferredMinutes = pickBestAvailableMinutes(preferredMode, sample.routeMatrix.totalMinutesByMode);
+    return {
+      dayLabel: sample.dayLabel,
+      preferredMinutes: dayPreferredMinutes,
+      congestionLevel: scoreCongestionByMinutes(option, dayPreferredMinutes),
+      minutesByMode: {
+        walking: sample.routeMatrix.totalMinutesByMode.walking,
+        transit: sample.routeMatrix.totalMinutesByMode.transit,
+        driving: sample.routeMatrix.totalMinutesByMode.driving
+      }
+    };
+  });
+
+  const validDayMinutes = dailyMetrics
+    .map((item) => item.preferredMinutes)
+    .filter((value): value is number => typeof value === "number");
+
+  return {
+    title: option.title,
+    preferredMode,
+    preferredModeLabel: summarizeModeLabel(preferredMode),
+    preferredMinutes,
+    congestionLevel: scoreCongestionByMinutes(option, preferredMinutes),
+    averagePreferredMinutesPerDay: validDayMinutes.length > 0
+      ? Math.round(validDayMinutes.reduce((sum, value) => sum + value, 0) / validDayMinutes.length)
+      : null,
+    peakPreferredMinutesPerDay: validDayMinutes.length > 0 ? Math.max(...validDayMinutes) : null,
+    evaluatedDays: dailyMetrics.length,
+    sampleMinutesByMode: {
+      walking: routeByMode.walking,
+      transit: routeByMode.transit,
+      driving: routeByMode.driving
+    },
+    dailyMetrics
+  };
+}
+
 export async function buildLiveTravelContext(profile: TravelPreferenceProfile | null, options: CandidatePlan[] = []) {
   if (!profile?.destination) {
     return {
       liveContext: "未提供目的地，无法查询实时地点与天气信息。",
-      routeContext: "未提供目的地，无法进行路线规划评估。"
+      routeContext: "未提供目的地，无法进行路线规划评估。",
+      optionRouteMetrics: [] as OptionRouteMetrics[]
     };
   }
 
   const destination = profile.destination;
 
-  if (!process.env.AMAP_API_KEY && !process.env.QWEATHER_API_KEY) {
+  const hasAmapKey = hasConfiguredAmapKey();
+
+  if (!hasAmapKey) {
     return {
-      liveContext: "未配置高德或和风天气 API Key，当前使用纯模型规划。",
-      routeContext: "未配置高德 API Key，无法进行路线规划评估。"
+      liveContext: "未配置高德 API Key，当前使用纯模型规划。",
+      routeContext: "未配置高德 API Key，无法进行路线规划评估。",
+      optionRouteMetrics: [] as OptionRouteMetrics[]
     };
   }
 
@@ -257,28 +368,57 @@ export async function buildLiveTravelContext(profile: TravelPreferenceProfile | 
     if (!geocode) {
       return {
         liveContext: `未能从高德解析目的地“${destination}”，已回退为通用规划。`,
-        routeContext: "目的地解析失败，无法进行路线规划评估。"
+        routeContext: "目的地解析失败，无法进行路线规划评估。",
+        optionRouteMetrics: [] as OptionRouteMetrics[]
       };
     }
 
-    const [forecast, pois] = await Promise.all([
-      process.env.QWEATHER_API_KEY ? getDailyForecast(geocode.location) : Promise.resolve([]),
-      process.env.AMAP_API_KEY ? searchPoi(buildPoiKeyword(destination, profile.interests), geocode.city) : Promise.resolve([])
+    const weatherCandidates = buildWeatherQueryCandidates(destination, geocode);
+    const [weatherResult, poisResult] = await Promise.allSettled([
+      resolveWeatherContext(weatherCandidates),
+      searchPoi(buildPoiKeyword(destination, profile.interests), geocode.city)
     ]);
 
-    const routeSamples = pois
-      .filter((poi) => poi.location)
-      .slice(0, 3);
+    const weatherLive =
+      weatherResult.status === "fulfilled"
+        ? weatherResult.value.live
+        : null;
+    const weatherForecast =
+      weatherResult.status === "fulfilled"
+        ? weatherResult.value.forecast
+        : [];
+    const weatherError =
+      weatherResult.status === "fulfilled"
+        ? weatherResult.value.error
+        : weatherResult.reason instanceof Error
+          ? weatherResult.reason
+          : new Error("unknown error");
+    const weatherQuery =
+      weatherResult.status === "fulfilled"
+        ? weatherResult.value.query
+        : "";
+    const pois =
+      poisResult.status === "fulfilled"
+        ? poisResult.value
+        : [];
 
-    const routeMatrix = await collectRouteMatrix(routeSamples, geocode.city);
-
-    const weatherSummary =
-      forecast.length > 0
-        ? forecast
-            .slice(0, 3)
-            .map((item) => `${item.fxDate} ${item.textDay} ${item.tempMin}-${item.tempMax}C`)
-            .join("；")
-        : "未获取到实时天气。";
+    const weatherParts: string[] = [];
+    if (weatherLive) {
+      weatherParts.push(`实况：${weatherLive.weather} ${weatherLive.temperature}°C 湿度${weatherLive.humidity}% ${weatherLive.winddirection}风${weatherLive.windpower}级`);
+    }
+    if (weatherForecast.length > 0) {
+      const forecastText = weatherForecast
+        .map((item) => `${item.date} ${item.dayweather} ${item.nighttemp}-${item.daytemp}°C`)
+        .join("；");
+      weatherParts.push(`预报：${forecastText}`);
+    }
+    if (weatherQuery) {
+      weatherParts.unshift(`查询参数：${weatherQuery}`);
+    }
+    if (weatherParts.length === 0 && weatherError) {
+      weatherParts.push(`未获取到天气信息，原因：${weatherError.message}`);
+    }
+    const weatherSummary = weatherParts.length > 0 ? weatherParts.join("\n") : "未获取到天气信息。";
 
     const poiSummary =
       pois.length > 0
@@ -288,34 +428,51 @@ export async function buildLiveTravelContext(profile: TravelPreferenceProfile | 
             .join("、")
         : "未获取到 POI 建议。";
 
-    const routeSummary = buildRouteSummary(routeSamples, routeMatrix.totalMinutesByMode);
+    const liveContext = [
+      `高德解析目的地：${geocode.formattedAddress}`,
+      `天气参考：${weatherSummary}`,
+      `POI 参考：${poiSummary}`
+    ].join("\n");
 
-    const optionRouteAssessments = await Promise.all(
-      options.map(async (option) => {
-        const dailySamples = await collectDailyRouteSamples(destination, geocode.city, option);
-        const aggregateLine = assessCongestion(option, routeMatrix.totalMinutesByMode);
-        const dailyAssessment = buildOptionDailyAssessment(option, dailySamples);
-        return [aggregateLine, dailyAssessment].join("\n");
-      })
-    );
+    let routeContext: string;
+    let optionRouteMetrics: OptionRouteMetrics[] = [];
 
-    const routeContext =
-      options.length > 0
-        ? [routeSummary, ...optionRouteAssessments].join("\n\n")
-        : routeSummary;
+    try {
+      const routeSamples = pois
+        .filter((poi) => poi.location)
+        .slice(0, 3);
 
-    return {
-      liveContext: [
-        `高德解析目的地：${geocode.formattedAddress}`,
-        `实时天气参考：${weatherSummary}`,
-        `POI 参考：${poiSummary}`
-      ].join("\n"),
-      routeContext
-    };
+      const routeMatrix = await collectRouteMatrix(routeSamples, geocode.city);
+
+      const routeSummary = buildRouteSummary(routeSamples, routeMatrix.totalMinutesByMode);
+
+      const optionRouteAssessments = await Promise.all(
+        options.map(async (option) => {
+          const dailySamples = await collectDailyRouteSamples(destination, geocode.city, option);
+          const aggregateLine = assessCongestion(option, routeMatrix.totalMinutesByMode);
+          const dailyAssessment = buildOptionDailyAssessment(option, dailySamples);
+          return {
+            text: [aggregateLine, dailyAssessment].join("\n"),
+            metrics: buildOptionRouteMetrics(option, routeMatrix.totalMinutesByMode, dailySamples)
+          };
+        })
+      );
+
+      routeContext =
+        options.length > 0
+          ? [routeSummary, ...optionRouteAssessments.map((item) => item.text)].join("\n\n")
+          : routeSummary;
+      optionRouteMetrics = optionRouteAssessments.map((item) => item.metrics);
+    } catch (routeError) {
+      routeContext = `路线规划评估失败：${routeError instanceof Error ? routeError.message : "unknown error"}`;
+    }
+
+    return { liveContext, routeContext, optionRouteMetrics };
   } catch (error) {
     return {
       liveContext: `实时数据查询失败，已回退为通用规划。失败原因：${error instanceof Error ? error.message : "unknown error"}`,
-      routeContext: "路线规划评估失败，已忽略路线约束。"
+      routeContext: "路线规划评估失败，已忽略路线约束。",
+      optionRouteMetrics: [] as OptionRouteMetrics[]
     };
   }
 }

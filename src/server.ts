@@ -13,10 +13,12 @@ import {
   parseArchiveThreadRequest,
   parsePlanRequest,
   parseReviseRequest,
+  refreshThreadLiveContext,
   runPlanningTurn,
   runRevisionTurn
 } from "./app/travel-planner-service.js";
 import { checkDatabaseHealth, closePool, getDatabaseMode } from "./infrastructure/database.js";
+import { geocodeDestination, searchNearbyPoi } from "./providers/amap.js";
 
 const paramsSchema = z.object({
   threadId: z.string().min(1)
@@ -25,6 +27,140 @@ const listQuerySchema = z.object({
   archived: z.enum(["true", "false"]).optional(),
   q: z.string().optional()
 });
+const nearbyFoodQuerySchema = z.object({
+  location: z.string().regex(/^-?\d+(\.\d+)?,-?\d+(\.\d+)?$/, "location 必须为 lng,lat 格式"),
+  radius: z.coerce.number().int().min(100).max(5000).optional(),
+  keyword: z.string().min(1).optional(),
+  city: z.string().min(1).optional()
+});
+const nearbyByAddressQuerySchema = z.object({
+  address: z.string().min(1, "address 不能为空"),
+  radius: z.coerce.number().int().min(100).max(5000).optional(),
+  keyword: z.string().min(1).optional(),
+  city: z.string().min(1).optional()
+});
+
+type AppErrorResponse = {
+  error: string;
+  code: string;
+  message: string;
+  requestId: string;
+  details?: string;
+  statusCode: number;
+};
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null;
+}
+
+function getStringField(value: unknown, key: string) {
+  if (!isRecord(value)) {
+    return undefined;
+  }
+
+  const field = value[key];
+  return typeof field === "string" && field.trim() ? field : undefined;
+}
+
+function buildAppErrorResponse(error: unknown, fallbackError: string, requestId: string): AppErrorResponse {
+  const message = error instanceof Error ? error.message : "服务内部发生未知错误。";
+  const status = typeof (isRecord(error) ? error.status : undefined) === "number"
+    ? Number((error as Record<string, unknown>).status)
+    : undefined;
+  const code = getStringField(error, "code");
+  const lcErrorCode = getStringField(error, "lc_error_code");
+  const errorType = getStringField(error, "name") || getStringField(error, "type");
+
+  if (status === 401 || code === "invalid_api_key" || lcErrorCode === "MODEL_AUTHENTICATION" || errorType === "AuthenticationError") {
+    return {
+      error: fallbackError,
+      code: "OPENAI_AUTHENTICATION_FAILED",
+      message: "OpenAI API Key 无效或已失效，请检查 .env 中的 OPENAI_API_KEY。",
+      details: message,
+      requestId,
+      statusCode: 401
+    };
+  }
+
+  if (status === 429 || code === "rate_limit_exceeded") {
+    return {
+      error: fallbackError,
+      code: "OPENAI_RATE_LIMITED",
+      message: "OpenAI 请求触发限流，请稍后重试。",
+      details: message,
+      requestId,
+      statusCode: 429
+    };
+  }
+
+  if (status === 403 || code === "insufficient_quota") {
+    return {
+      error: fallbackError,
+      code: "OPENAI_QUOTA_EXCEEDED",
+      message: "OpenAI 账户额度不足或当前项目无权限访问该模型。",
+      details: message,
+      requestId,
+      statusCode: 403
+    };
+  }
+
+  if (code === "model_not_found") {
+    return {
+      error: fallbackError,
+      code: "OPENAI_MODEL_UNAVAILABLE",
+      message: "当前配置的模型不可用，请检查 OPENAI_MODEL 是否可访问。",
+      details: message,
+      requestId,
+      statusCode: 400
+    };
+  }
+
+  if (error instanceof Error) {
+    return {
+      error: fallbackError,
+      code: "INTERNAL_ERROR",
+      message: "规划执行失败。",
+      details: message,
+      requestId,
+      statusCode: 500
+    };
+  }
+
+  return {
+    error: fallbackError,
+    code: "UNKNOWN_ERROR",
+    message: "规划执行失败，且未能解析出具体原因。",
+    requestId,
+    statusCode: 500
+  };
+}
+
+function buildRouteErrorResponse(
+  error: unknown,
+  fallbackError: string,
+  requestId: string,
+  fallbackMessage: string,
+  statusCode = 500
+): AppErrorResponse {
+  if (error instanceof Error) {
+    return {
+      error: fallbackError,
+      code: fallbackError,
+      message: fallbackMessage,
+      details: error.message,
+      requestId,
+      statusCode
+    };
+  }
+
+  return {
+    error: fallbackError,
+    code: fallbackError,
+    message: fallbackMessage,
+    requestId,
+    statusCode
+  };
+}
 
 async function buildServer() {
   const app = Fastify({
@@ -57,6 +193,83 @@ async function buildServer() {
     }
   });
 
+  async function handleNearbyPoiSearch(request: Fastify.FastifyRequest, reply: Fastify.FastifyReply) {
+    try {
+      const query = nearbyFoodQuerySchema.parse(request.query);
+      const pois = await searchNearbyPoi(
+        query.location,
+        query.keyword || "美食",
+        query.radius ?? 1000,
+        query.city
+      );
+
+      return reply.send({
+        location: query.location,
+        radius: query.radius ?? 1000,
+        keyword: query.keyword || "美食",
+        city: query.city,
+        count: pois.length,
+        pois
+      });
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "INVALID_REQUEST",
+          issues: error.issues
+        });
+      }
+
+      request.log.error(error);
+      const payload = buildRouteErrorResponse(error, "POI_SEARCH_FAILED", request.id, "附近地点查询失败。");
+      return reply.code(payload.statusCode).send(payload);
+    }
+  }
+
+  app.get("/api/pois/nearby", handleNearbyPoiSearch);
+  app.get("/api/pois/nearby-food", handleNearbyPoiSearch);
+  app.get("/api/pois/nearby-by-address", async (request, reply) => {
+    try {
+      const query = nearbyByAddressQuerySchema.parse(request.query);
+      const geocode = await geocodeDestination(query.address);
+
+      if (!geocode?.location) {
+        return reply.code(404).send({
+          error: "ADDRESS_NOT_FOUND",
+          message: "未能解析该地址，无法查询附近 POI。"
+        });
+      }
+
+      const pois = await searchNearbyPoi(
+        geocode.location,
+        query.keyword || "美食",
+        query.radius ?? 1000,
+        query.city || geocode.city
+      );
+
+      return reply.send({
+        address: query.address,
+        resolvedAddress: geocode.formattedAddress,
+        location: geocode.location,
+        radius: query.radius ?? 1000,
+        keyword: query.keyword || "美食",
+        city: query.city || geocode.city,
+        count: pois.length,
+        pois
+      });
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "INVALID_REQUEST",
+          issues: error.issues
+        });
+      }
+
+      request.log.error(error);
+      const payload = buildRouteErrorResponse(error, "POI_SEARCH_FAILED", request.id, "按地址查询附近地点失败。");
+      return reply.code(payload.statusCode).send(payload);
+    }
+  });
+
   app.post("/api/trips/plan", async (request, reply) => {
     try {
       const payload = parsePlanRequest(request.body);
@@ -71,9 +284,8 @@ async function buildServer() {
       }
 
       request.log.error(error);
-      return reply.code(500).send({
-        error: "PLANNING_FAILED"
-      });
+      const payload = buildAppErrorResponse(error, "PLANNING_FAILED", request.id);
+      return reply.code(payload.statusCode).send(payload);
     }
   });
 
@@ -91,9 +303,8 @@ async function buildServer() {
       }
 
       request.log.error(error);
-      return reply.code(500).send({
-        error: "REVISION_FAILED"
-      });
+      const payload = buildAppErrorResponse(error, "REVISION_FAILED", request.id);
+      return reply.code(payload.statusCode).send(payload);
     }
   });
 
@@ -115,9 +326,9 @@ async function buildServer() {
         threads: filtered
       });
     } catch (error) {
-      return reply.code(500).send({
-        error: "THREAD_LIST_FAILED"
-      });
+      request.log.error(error);
+      const payload = buildRouteErrorResponse(error, "THREAD_LIST_FAILED", request.id, "线程列表加载失败。");
+      return reply.code(payload.statusCode).send(payload);
     }
   });
 
@@ -144,9 +355,9 @@ async function buildServer() {
         });
       }
 
-      return reply.code(500).send({
-        error: "THREAD_ARCHIVE_FAILED"
-      });
+      request.log.error(error);
+      const payload = buildRouteErrorResponse(error, "THREAD_ARCHIVE_FAILED", request.id, "线程归档操作失败。");
+      return reply.code(payload.statusCode).send(payload);
     }
   });
 
@@ -175,9 +386,34 @@ async function buildServer() {
       }
 
       request.log.error(error);
-      return reply.code(500).send({
-        error: "THREAD_LOOKUP_FAILED"
-      });
+      const payload = buildRouteErrorResponse(error, "THREAD_LOOKUP_FAILED", request.id, "线程加载失败。");
+      return reply.code(payload.statusCode).send(payload);
+    }
+  });
+
+  app.post("/api/trips/:threadId/refresh-live-context", async (request, reply) => {
+    try {
+      const { threadId } = paramsSchema.parse(request.params);
+      const refreshed = await refreshThreadLiveContext(threadId);
+
+      if (!refreshed) {
+        return reply.code(404).send({
+          error: "THREAD_NOT_FOUND"
+        });
+      }
+
+      return reply.send(refreshed);
+    } catch (error) {
+      if (error instanceof ZodError) {
+        return reply.code(400).send({
+          error: "INVALID_THREAD_ID",
+          issues: error.issues
+        });
+      }
+
+      request.log.error(error);
+      const payload = buildRouteErrorResponse(error, "REFRESH_LIVE_CONTEXT_FAILED", request.id, "刷新实时信息失败。");
+      return reply.code(payload.statusCode).send(payload);
     }
   });
 

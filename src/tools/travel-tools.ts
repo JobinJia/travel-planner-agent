@@ -65,7 +65,7 @@ export function estimateBudget(input: {
   const total = hotelAndFood + transport + activities;
 
   return {
-    currency: "CNY",
+    currency: "CNY" as const,
     destination: input.destination,
     days: input.days,
     travelers: input.travelers,

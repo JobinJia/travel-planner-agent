@@ -1,7 +1,7 @@
 import { mkdir, readdir, readFile, writeFile } from "node:fs/promises";
 import path from "node:path";
 
-import { CandidatePlan, ConfirmationOption, ThreadMessage, TravelPreferenceProfile } from "../types/travel.js";
+import { CandidatePlan, ConfirmationOption, OptionComparison, ThreadMessage, TravelPreferenceProfile } from "../types/travel.js";
 
 export type ThreadSnapshot = {
   threadId: string;
@@ -13,6 +13,7 @@ export type ThreadSnapshot = {
   assumptions: string[];
   options: CandidatePlan[];
   comparison: string;
+  optionComparisons?: OptionComparison[];
   liveContext?: string;
   routeContext?: string;
   requiresConfirmation?: boolean;

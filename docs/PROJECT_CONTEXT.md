@@ -22,8 +22,7 @@ The project is no longer a skeleton. It already includes:
 - separate Postgres-backed thread message persistence
 - local file snapshots for fallback and thread list recovery
 - domestic China-oriented live providers:
-  - AMap for geocoding / POI / routing
-  - QWeather for forecast
+  - AMap for geocoding / POI / routing / weather
 
 ## Core Product Flow
 
@@ -55,6 +54,8 @@ The frontend currently supports:
 - creating or continuing a thread
 - viewing result text
 - viewing live context and route context
+- querying nearby POIs by coordinate and keyword
+- looking up nearby food directly from itinerary items
 - browsing candidate plans
 - browsing structured `dailyPlan`
 - recovering thread history from the sidebar
@@ -66,7 +67,7 @@ The frontend currently supports:
 
 - `pnpm` as the only package manager
 - `Fastify + LangGraph` as the backend core
-- AMap/QWeather provider separation from graph logic
+- AMap provider separation from graph logic
 - thread-centric product model
 - structured confirmation options for frontend rendering
 

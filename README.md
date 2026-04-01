@@ -66,9 +66,9 @@ cp .env.example .env
 
 ```bash
 OPENAI_API_KEY=your_openai_api_key
-OPENAI_MODEL=gpt-4.1-mini
+OPENAI_BASE_URL=https://api.openai.com/v1
+OPENAI_MODEL=gpt-5.4
 AMAP_API_KEY=your_amap_api_key
-QWEATHER_API_KEY=your_qweather_api_key
 ```
 
 如果你要直接用本地 Postgres 开发，先启动数据库：
@@ -133,6 +133,24 @@ curl http://localhost:3000/health
 curl http://localhost:3000/health/db
 ```
 
+查询指定坐标附近的美食：
+
+```bash
+curl "http://localhost:3000/api/pois/nearby?location=121.497253,31.238235&radius=1000"
+```
+
+如果你只有地点名，也可以先让服务端做地理编码，再查附近：
+
+```bash
+curl "http://localhost:3000/api/pois/nearby-by-address?address=%E4%B8%8A%E6%B5%B7%20%E5%A4%96%E6%BB%A9&radius=1000&keyword=%E7%BE%8E%E9%A3%9F"
+```
+
+如果你想指定关键词，也可以这样查：
+
+```bash
+curl "http://localhost:3000/api/pois/nearby?location=121.497253,31.238235&radius=1500&keyword=咖啡"
+```
+
 发起或续写一次规划：
 
 ```bash
@@ -179,11 +197,13 @@ curl http://localhost:3000/api/trips/thread/demo-trip
 - 候选方案包含结构化 `dailyPlan`，便于逐日路线评估
 - 提供季节建议与打包建议
 - 可接入高德地点解析与 POI 搜索
-- 可接入和风天气实时预报
+- 支持按指定坐标搜索附近美食或其他 POI
+- 可接入高德天气（实况 + 预报）
 - 可接入高德路线规划并评估行程拥挤度
 - 检测到高拥挤度时会进入确认节点，等待用户选择调整方向
 - 通过 Fastify 暴露 HTTP API
 - 提供浏览器单页交互界面，支持确认按钮直接回传
+- 浏览器页面内置附近 POI 搜索面板，可直接联调高德周边搜索
 - 前端支持会话历史、候选方案卡片与结构化日程浏览
 - 前端支持线程历史侧栏与一键恢复最近线程
 - 线程快照会持久化消息级历史，恢复时可看到每轮用户/agent 记录

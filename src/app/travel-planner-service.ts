@@ -5,6 +5,7 @@ import { createTravelPlannerGraph } from "../graph/travel-graph.js";
 import { createThreadSnapshotStore } from "../store/thread-snapshot-store.js";
 import { appendThreadMessages, getThreadMessages } from "../store/thread-message-store.js";
 import { ThreadMessage } from "../types/travel.js";
+import { buildLiveTravelContext } from "../tools/live-travel-context.js";
 
 const planRequestSchema = z.object({
   threadId: z.string().min(1).optional(),
@@ -82,6 +83,7 @@ async function executePlanningTurn(input: PlanRequest | ReviseRequest) {
     assumptions: result.assumptions,
     options: result.options,
     comparison: result.comparison,
+    optionComparisons: result.optionComparisons,
     liveContext: result.liveContext,
     routeContext: result.routeContext
   };
@@ -117,6 +119,7 @@ async function executePlanningTurn(input: PlanRequest | ReviseRequest) {
     assumptions: response.assumptions,
     options: response.options,
     comparison: response.comparison,
+    optionComparisons: response.optionComparisons,
     liveContext: response.liveContext,
     routeContext: response.routeContext,
     messages
@@ -169,6 +172,46 @@ export async function getThreadState(threadId: string) {
       ...persistedSnapshot,
       messages
     }
+  };
+}
+
+export async function refreshThreadLiveContext(threadId: string) {
+  const snapshot = await getThreadState(threadId);
+  if (!snapshot) {
+    return null;
+  }
+
+  const profile = snapshot.state.profile ?? null;
+  const options = snapshot.state.options ?? [];
+  const refreshed = await buildLiveTravelContext(profile, options);
+  const updatedAt = new Date().toISOString();
+
+  await threadSnapshotStore.save({
+    threadId,
+    updatedAt,
+    latestUserRequest: snapshot.state.latestUserRequest ?? "",
+    finalAnswer: snapshot.state.finalAnswer ?? "",
+    profile,
+    missingInfo: snapshot.state.missingInfo ?? [],
+    assumptions: snapshot.state.assumptions ?? [],
+    options,
+    comparison: snapshot.state.comparison ?? "",
+    optionComparisons: snapshot.state.optionComparisons ?? [],
+    liveContext: refreshed.liveContext,
+    routeContext: refreshed.routeContext,
+    requiresConfirmation: snapshot.state.requiresConfirmation ?? false,
+    confirmationMessage: snapshot.state.confirmationMessage ?? "",
+    confirmationOptions: snapshot.state.confirmationOptions ?? [],
+    confirmationResolved: snapshot.state.confirmationResolved ?? false,
+    messages: snapshot.state.messages ?? [],
+    archived: snapshot.state.archived ?? false
+  });
+
+  return {
+    threadId,
+    refreshedAt: updatedAt,
+    liveContext: refreshed.liveContext,
+    routeContext: refreshed.routeContext
   };
 }
 

@@ -3,121 +3,76 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>Travel Planner Agent</title>
+    <title>旅行规划助手</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Noto+Serif+SC:wght@500;700&family=IBM+Plex+Sans+SC:wght@400;500;600;700&display=swap" rel="stylesheet" />
     <link rel="stylesheet" href="/styles.css" />
   </head>
   <body>
     <main class="page">
-      <div class="app-layout">
-        <aside class="sidebar">
-          <section class="hero compact-hero">
-            <p class="eyebrow">Travel Planner Agent</p>
-            <h1>旅行规划助手</h1>
-            <p class="subtitle">恢复旧线程，或继续推进新的行程协商。</p>
-          </section>
+      <aside class="sidebar" id="sidebar">
+        <div class="sidebar-header">
+          <h1 class="app-title">旅行规划助手</h1>
+          <button id="new-thread-btn" type="button" class="btn-icon" title="新建对话">
+            <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="9" y1="3" x2="9" y2="15"/><line x1="3" y1="9" x2="15" y2="9"/></svg>
+          </button>
+        </div>
+        <input id="thread-search" type="text" class="sidebar-search" placeholder="搜索线程..." />
+        <div class="thread-filters">
+          <button id="show-active" type="button" class="filter-btn active">活跃</button>
+          <button id="show-archived" type="button" class="filter-btn">已归档</button>
+        </div>
+        <div id="thread-list" class="thread-list"></div>
+      </aside>
 
-          <section class="panel thread-panel">
-            <div class="panel-head">
-              <h2>线程历史</h2>
-              <p>点击即可恢复最近一次规划结果。</p>
+      <div class="chat-column">
+        <div class="chat-header" id="chat-header">
+          <button id="sidebar-toggle" type="button" class="btn-icon mobile-only" title="打开侧栏">
+            <svg width="20" height="20" viewBox="0 0 20 20" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><line x1="3" y1="5" x2="17" y2="5"/><line x1="3" y1="10" x2="17" y2="10"/><line x1="3" y1="15" x2="17" y2="15"/></svg>
+          </button>
+          <span id="chat-title" class="chat-title">新对话</span>
+          <button id="refresh-live-btn" type="button" class="header-action-btn hidden" title="刷新实时信息">刷新实时信息</button>
+        </div>
+
+        <div id="welcome-screen" class="welcome-screen">
+          <div class="welcome-content">
+            <div class="welcome-icon">
+              <svg width="48" height="48" viewBox="0 0 48 48" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M24 4L28 14L38 16L30 24L32 34L24 30L16 34L18 24L10 16L20 14Z"/>
+                <circle cx="24" cy="24" r="22"/>
+              </svg>
             </div>
-            <div class="thread-toolbar">
-              <input id="thread-search" type="text" placeholder="搜索 threadId 或需求..." />
-              <div class="thread-filters">
-                <button id="show-active" type="button" class="secondary">活跃</button>
-                <button id="show-archived" type="button" class="secondary">已归档</button>
-              </div>
+            <h2>开始规划你的旅程</h2>
+            <p>输入目的地、时间、预算等需求，AI 会为你生成候选方案并评估路线</p>
+            <div class="welcome-hints">
+              <span>多轮对话</span>
+              <span>路线评估</span>
+              <span>结构化日程</span>
+              <span>附近推荐</span>
             </div>
-            <div id="thread-list" class="thread-list"></div>
-          </section>
-        </aside>
+          </div>
+        </div>
 
-        <div class="main-column">
-          <section class="panel composer">
-            <div class="panel-head">
-              <h2>新建或继续一个线程</h2>
-              <p>填写 `threadId` 可继续修改原方案，留空则自动生成。</p>
+        <div id="message-area" class="message-area hidden">
+          <div id="message-list" class="message-list"></div>
+        </div>
+
+        <div class="input-bar">
+          <div id="status-bar" class="status-bar hidden"></div>
+          <form id="planner-form" class="input-form">
+            <input id="thread-id" type="hidden" value="" />
+            <div class="input-wrapper">
+              <textarea id="message" rows="1" placeholder="描述你的旅行需求..." required></textarea>
+              <button id="submit-button" type="submit" class="send-btn" title="发送">
+                <svg width="18" height="18" viewBox="0 0 18 18" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="9" y1="15" x2="9" y2="3"/><polyline points="3,8 9,3 15,8"/></svg>
+              </button>
             </div>
-
-            <form id="planner-form" class="form">
-              <label class="field">
-                <span>Thread ID</span>
-                <input id="thread-id" name="threadId" type="text" placeholder="例如 demo-trip" />
-              </label>
-
-              <label class="field">
-                <span>旅行需求</span>
-                <textarea
-                  id="message"
-                  name="message"
-                  rows="6"
-                  placeholder="例如：我想 5 月去日本玩 7 天，预算 2 万，偏美食和城市漫游"
-                  required
-                ></textarea>
-              </label>
-
-              <div class="actions">
-                <button id="submit-button" type="submit">开始规划</button>
-                <button id="revise-button" type="button" class="secondary">作为修订提交</button>
-              </div>
-            </form>
-          </section>
-
-          <section id="status-panel" class="panel status hidden"></section>
-
-          <section id="result-panel" class="panel result hidden">
-            <div class="panel-head">
-              <h2>规划结果</h2>
-              <p id="thread-label"></p>
-            </div>
-
-            <section class="conversation-shell">
-              <div class="panel-head compact">
-                <h3>会话历史</h3>
-                <p>当前线程内的最新交互记录。</p>
-              </div>
-              <div id="conversation-log" class="conversation-log"></div>
-            </section>
-
-            <div class="result-grid">
-              <article class="result-card">
-                <h3>最终输出</h3>
-                <pre id="final-answer"></pre>
-              </article>
-
-              <article class="result-card">
-                <h3>实时上下文</h3>
-                <pre id="live-context"></pre>
-              </article>
-
-              <article class="result-card">
-                <h3>路线评估</h3>
-                <pre id="route-context"></pre>
-              </article>
-
-              <article class="result-card">
-                <h3>候选方案</h3>
-                <div id="options" class="option-grid"></div>
-              </article>
-
-              <article class="result-card wide">
-                <h3>结构化日程</h3>
-                <div id="daily-plan-view" class="daily-plan-view"></div>
-              </article>
-            </div>
-
-            <div id="confirmation-panel" class="confirmation hidden">
-              <div class="panel-head">
-                <h3>需要确认</h3>
-                <p id="confirmation-message"></p>
-              </div>
-              <div id="confirmation-options" class="confirmation-options"></div>
-            </div>
-          </section>
+          </form>
         </div>
       </div>
     </main>
 
     <script type="module" src="/app.js"></script>
   </body>
-  </html>
+</html>

@@ -1,20 +1,32 @@
 const AMAP_BASE_URL = "https://restapi.amap.com";
 
+function getAmapApiKey() {
+  const key = process.env.AMAP_API_KEY?.trim();
+  if (!key || key === "your_amap_api_key") {
+    return null;
+  }
+
+  return key;
+}
+
 type AmapGeocodeResponse = {
   status: string;
   info?: string;
+  infocode?: string;
   geocodes?: Array<{
     formatted_address?: string;
     location?: string;
     adcode?: string;
+    province?: string;
     city?: string | string[];
-    district?: string;
+    district?: string | string[];
   }>;
 };
 
 type AmapPoiResponse = {
   status: string;
   info?: string;
+  infocode?: string;
   pois?: Array<{
     id?: string;
     name?: string;
@@ -27,6 +39,7 @@ type AmapPoiResponse = {
 type AmapDrivingRouteResponse = {
   status: string;
   info?: string;
+  infocode?: string;
   route?: {
     paths?: Array<{
       distance?: string;
@@ -38,6 +51,7 @@ type AmapDrivingRouteResponse = {
 type AmapWalkingRouteResponse = {
   status: string;
   info?: string;
+  infocode?: string;
   route?: {
     paths?: Array<{
       distance?: string;
@@ -49,6 +63,7 @@ type AmapWalkingRouteResponse = {
 type AmapTransitRouteResponse = {
   status: string;
   info?: string;
+  infocode?: string;
   route?: {
     transits?: Array<{
       duration?: string;
@@ -56,6 +71,59 @@ type AmapTransitRouteResponse = {
       distance?: string;
     }>;
   };
+};
+
+type AmapWeatherLiveResponse = {
+  status: string;
+  info?: string;
+  infocode?: string;
+  lives?: Array<{
+    province: string;
+    city: string;
+    weather: string;
+    temperature: string;
+    winddirection: string;
+    windpower: string;
+    humidity: string;
+    reporttime: string;
+  }>;
+};
+
+type AmapWeatherForecastResponse = {
+  status: string;
+  info?: string;
+  infocode?: string;
+  forecasts?: Array<{
+    province: string;
+    city: string;
+    casts: Array<{
+      date: string;
+      dayweather: string;
+      nightweather: string;
+      daytemp: string;
+      nighttemp: string;
+      daywind: string;
+      daypower: string;
+    }>;
+  }>;
+};
+
+export type AmapWeatherLive = {
+  city: string;
+  weather: string;
+  temperature: string;
+  humidity: string;
+  winddirection: string;
+  windpower: string;
+  reporttime: string;
+};
+
+export type AmapWeatherForecast = {
+  date: string;
+  dayweather: string;
+  nightweather: string;
+  daytemp: string;
+  nighttemp: string;
 };
 
 export type RouteMode = "walking" | "driving" | "transit";
@@ -67,7 +135,7 @@ export type RouteSummary = {
 };
 
 async function requestJson<T>(path: string, params: Record<string, string>) {
-  const key = process.env.AMAP_API_KEY;
+  const key = getAmapApiKey();
   if (!key) {
     return null;
   }
@@ -86,7 +154,32 @@ async function requestJson<T>(path: string, params: Record<string, string>) {
     throw new Error(`AMap request failed: ${response.status}`);
   }
 
-  return response.json() as Promise<T>;
+  const data = await response.json() as T & {
+    status?: string;
+    info?: string;
+    infocode?: string;
+  };
+
+  if (data && typeof data === "object" && data.status && data.status !== "1") {
+    const info = data.info || "unknown error";
+    const infocode = data.infocode ? ` (${data.infocode})` : "";
+    throw new Error(`AMap API error: ${info}${infocode}`);
+  }
+
+  return data;
+}
+
+function normalizeLocationText(value?: string | string[]) {
+  if (Array.isArray(value)) {
+    return value.map((item) => item.trim()).find(Boolean);
+  }
+
+  if (typeof value !== "string") {
+    return undefined;
+  }
+
+  const normalized = value.trim();
+  return normalized || undefined;
 }
 
 export async function geocodeDestination(address: string) {
@@ -103,12 +196,14 @@ export async function geocodeDestination(address: string) {
     formattedAddress: item.formatted_address || address,
     location: item.location,
     adcode: item.adcode,
-    city: Array.isArray(item.city) ? item.city.join(",") : item.city,
-    district: item.district
+    province: normalizeLocationText(item.province),
+    city: normalizeLocationText(item.city),
+    district: normalizeLocationText(item.district)
   } as {
     formattedAddress: string;
     location: string;
     adcode?: string;
+    province?: string;
     city?: string;
     district?: string;
   };
@@ -118,6 +213,33 @@ export async function searchPoi(keyword: string, city?: string) {
   const data = await requestJson<AmapPoiResponse>("/v5/place/text", {
     keywords: keyword,
     page_size: "5",
+    city: city || ""
+  });
+
+  if (!data || data.status !== "1") {
+    return [];
+  }
+
+  return (data.pois || []).map((poi) => ({
+    id: poi.id || "",
+    name: poi.name || keyword,
+    type: poi.type || "",
+    address: poi.address || "",
+    location: poi.location || ""
+  }));
+}
+
+export async function searchNearbyPoi(
+  location: string,
+  keyword: string,
+  radiusMeters = 1000,
+  city?: string
+) {
+  const data = await requestJson<AmapPoiResponse>("/v5/place/around", {
+    location,
+    keywords: keyword,
+    radius: String(radiusMeters),
+    page_size: "10",
     city: city || ""
   });
 
@@ -188,4 +310,45 @@ export async function getTransitRoute(origin: string, destination: string, city?
     durationSeconds: Number(transit.duration),
     walkingDistanceMeters: Number(transit.walking_distance || 0)
   };
+}
+
+export async function getWeatherLive(cityQuery: string): Promise<AmapWeatherLive | null> {
+  const data = await requestJson<AmapWeatherLiveResponse>("/v3/weather/weatherInfo", {
+    city: cityQuery,
+    extensions: "base"
+  });
+
+  if (!data || data.status !== "1" || !data.lives?.[0]) {
+    return null;
+  }
+
+  const live = data.lives[0];
+  return {
+    city: live.city,
+    weather: live.weather,
+    temperature: live.temperature,
+    humidity: live.humidity,
+    winddirection: live.winddirection,
+    windpower: live.windpower,
+    reporttime: live.reporttime
+  };
+}
+
+export async function getWeatherForecast(cityQuery: string): Promise<AmapWeatherForecast[]> {
+  const data = await requestJson<AmapWeatherForecastResponse>("/v3/weather/weatherInfo", {
+    city: cityQuery,
+    extensions: "all"
+  });
+
+  if (!data || data.status !== "1" || !data.forecasts?.[0]?.casts) {
+    return [];
+  }
+
+  return data.forecasts[0].casts.map((cast) => ({
+    date: cast.date,
+    dayweather: cast.dayweather,
+    nightweather: cast.nightweather,
+    daytemp: cast.daytemp,
+    nighttemp: cast.nighttemp
+  }));
 }
